@@ -6,11 +6,10 @@ const cors = require("cors");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 
-const app = express();
-
 const PORT = process.env.PORT || 5000;
 const uri = process.env.MONGO_URI;
 
+const app = express();
 app.use(cors());
 app.use(express.json());
 
@@ -69,14 +68,15 @@ app.get("/", (req, res) => {
         </style>
       </head>
       <body>
-        <img src="https://i0.wp.com/www.memelate.com/wp-content/uploads/2023/04/manna-obak-meme-template.png" alt="funny meme">
+        <img src="https://i0.wp.com/www.memelate.com/wp-content/uploads/2023/04/manna-obak-meme-template.png" alt="চাচা আপনে?">
       </body>
     </html>
   `);
 });
 
+// Converting ISO date string into YYYY-MM-DD format
 const normalizeDate = (date) => String(date ?? "").split("T")[0];
-
+// Normalizing time into HH:MM format
 const normalizeTime = (time) => {
   const [hours, minutes = "0"] = String(time ?? "")
     .trim()
@@ -87,7 +87,7 @@ const normalizeTime = (time) => {
   if (Number.isNaN(hour) || Number.isNaN(minute)) {
     return null;
   }
-
+  // Using padStart() for the first time to ensure two-digit formatting for hours and minutes
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 };
 
