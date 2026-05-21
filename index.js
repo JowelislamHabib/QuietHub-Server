@@ -1,18 +1,15 @@
 // Bismillah
 
 require("dotenv").config();
-
 const express = require("express");
 const cors = require("cors");
-
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 
 const app = express();
 
 const PORT = process.env.PORT || 5000;
 const uri = process.env.MONGO_URI;
-
-const { createRemoteJWKSet, jwtVerify } = require("jose-cjs");
 
 app.use(cors());
 app.use(express.json());
@@ -53,7 +50,7 @@ app.get("/", (req, res) => {
     <!DOCTYPE html>
     <html>
       <head>
-        <title>Not Hello World</title>
+        <title>চাচা আপনে?</title>
         <style>
           body {
             margin: 0;
@@ -165,7 +162,7 @@ const roomLookupStages = [
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
 
     const db = client.db("silentium");
 
@@ -690,7 +687,7 @@ async function run() {
       }
     });
 
-    await client.db("admin").command({ ping: 1 });
+    // await client.db("admin").command({ ping: 1 });
     console.log(
       "Pinged your deployment. You successfully connected to MongoDB!",
     );
