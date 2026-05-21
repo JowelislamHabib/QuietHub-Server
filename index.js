@@ -94,6 +94,7 @@ const normalizeTime = (time) => {
   return `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;
 };
 
+// Converting roomId to both ObjectId and string formats as I am sending roomId from the BookingButton component.
 const buildRoomIdFilter = (roomId) => {
   const roomIdString = String(roomId);
 
@@ -102,6 +103,7 @@ const buildRoomIdFilter = (roomId) => {
   };
 };
 
+// Validating and normalizing time and date booking input before checking DB conflicts.
 const findBookingConflict = async (
   bookingsCollection,
   { roomId, date, startTime, endTime, excludeBookingId },
@@ -134,6 +136,7 @@ const findBookingConflict = async (
   return conflict;
 };
 
+// Trying to full room details inside each booking response by roomId
 const roomLookupStages = [
   {
     $addFields: {
@@ -162,7 +165,7 @@ const roomLookupStages = [
     },
   },
 ];
-
+// Main MongoDB connection and server start function, where all the API routes are defined inside the try block to ensure DB connection is established before handling any requests.
 async function run() {
   try {
     // await client.connect();
@@ -318,7 +321,7 @@ async function run() {
         } = bookingData;
 
         if (!roomId || !userId || !date || !startTime || !endTime) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Missing required fields",
           });
@@ -330,14 +333,14 @@ async function run() {
         const normalizedEnd = normalizeTime(endTime);
 
         if (!normalizedDate || !normalizedStart || !normalizedEnd) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Invalid date or time",
           });
         }
 
         if (normalizedStart >= normalizedEnd) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "End time must be after start time",
           });
@@ -348,7 +351,7 @@ async function run() {
         });
 
         if (!room) {
-          return res.status(404).json({
+          return res.json({
             success: false,
             message: "Room not found",
           });
@@ -362,14 +365,14 @@ async function run() {
         });
 
         if (conflict?.invalid) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Invalid date or time",
           });
         }
 
         if (conflict) {
-          return res.status(409).json({
+          return res.json({
             success: false,
             message: "Room already booked for this time",
           });
@@ -481,7 +484,7 @@ async function run() {
         }
 
         if (!date || !startTime || !endTime) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Missing required fields",
           });
@@ -492,14 +495,14 @@ async function run() {
         const normalizedEnd = normalizeTime(endTime);
 
         if (!normalizedDate || !normalizedStart || !normalizedEnd) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Invalid date or time",
           });
         }
 
         if (normalizedStart >= normalizedEnd) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "End time must be after start time",
           });
@@ -514,14 +517,14 @@ async function run() {
         });
 
         if (conflict?.invalid) {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: "Invalid date or time",
           });
         }
 
         if (conflict) {
-          return res.status(409).json({
+          return res.json({
             success: false,
             message: "Room already booked for this time",
           });
