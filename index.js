@@ -1,4 +1,7 @@
 // Bismillah
+//===============
+// Apologies for too many comments, but I wanted to make sure everything is clear for me so that I can easily come back to this code in the future and understand it without much effort. I will try to keep the comments concise though.
+//===============
 
 require("dotenv").config();
 const express = require("express");
