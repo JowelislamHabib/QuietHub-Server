@@ -275,7 +275,7 @@ async function run() {
 
     // Get all bookings with room details
 
-    app.get("/bookings", async (req, res) => {
+    app.get("/bookings", verifyToken, async (req, res) => {
       try {
         const result = await bookingsCollection
           .aggregate([
