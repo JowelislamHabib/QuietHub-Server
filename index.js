@@ -439,7 +439,7 @@ async function run() {
 
     // My Booking - Single user bookings, with room details
 
-    app.get("/my-bookings/:userId", async (req, res) => {
+    app.get("/my-bookings/:userId", verifyToken, async (req, res) => {
       try {
         const userId = req.params.userId;
 
