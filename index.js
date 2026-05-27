@@ -16,6 +16,28 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+const normalizeBaseUrl = (value) => String(value || "").replace(/\/+$/, "");
+const PIPRAPAY_BASE_URL = normalizeBaseUrl(
+  process.env.PIPRAPAY_ENDPOINT ||
+    process.env.PIPRAPAY_BASE_URL ||
+    "https://sandbox.piprapay.com",
+);
+const PIPRAPAY_API_KEY = process.env.PIPRAPAY_API_KEY;
+const PIPRAPAY_CHECKOUT_REDIRECT_URL =
+  process.env.PIPRAPAY_CHECKOUT_REDIRECT_URL;
+const PIPRAPAY_VERIFY_PAYMENT_URL = process.env.PIPRAPAY_VERIFY_PAYMENT_URL;
+const PIPRAPAY_REFUND_URL = process.env.PIPRAPAY_REFUND_URL;
+const buildPipraPayUrl = ({ path, fullUrl }) => {
+  if (fullUrl) {
+    return fullUrl;
+  }
+  return `${PIPRAPAY_BASE_URL}${path}`;
+};
+const getErrorDetails = (error) => ({
+  message: error?.message || "Unknown error",
+  code: error?.cause?.code || null,
+});
+
 const JWKS = createRemoteJWKSet(
   new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
 );
@@ -174,6 +196,36 @@ async function run() {
 
     const roomsCollection = db.collection("rooms");
     const bookingsCollection = db.collection("bookings");
+    const paymentsCollection = db.collection("payments");
+
+    // Shared requester for PipraPay APIs
+    const pipraPayRequest = async ({ path, fullUrl, payload }) => {
+      const response = await fetch(buildPipraPayUrl({ path, fullUrl }), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "mh-piprapay-api-key": PIPRAPAY_API_KEY,
+          "MHS-PIPRAPAY-API-KEY": PIPRAPAY_API_KEY,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const rawBody = await response.text();
+      let responseBody = null;
+      try {
+        responseBody = rawBody ? JSON.parse(rawBody) : null;
+      } catch (error) {
+        responseBody = null;
+      }
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        responseBody,
+        rawBody,
+        contentType: response.headers.get("content-type"),
+      };
+    };
 
     // Get all rooms (with search & filters)
 
@@ -689,6 +741,231 @@ async function run() {
           success: false,
           message: "Failed to delete room",
           error,
+        });
+      }
+    });
+
+    // Create PipraPay charge for checkout
+    app.post("/payments/piprapay/create-charge", async (req, res) => {
+      try {
+        if (!PIPRAPAY_API_KEY) {
+          return res.status(500).json({
+            success: false,
+            message: "PIPRAPAY_API_KEY missing in server env",
+          });
+        }
+
+        const {
+          full_name,
+          email_mobile,
+          email_address,
+          mobile_number,
+          amount,
+          metadata = {},
+          redirect_url,
+          return_type = "GET",
+          cancel_url,
+          webhook_url,
+          currency = "BDT",
+        } = req.body;
+
+        const contact = email_mobile || email_address || mobile_number;
+        if (!full_name || !contact || !amount) {
+          return res.status(400).json({
+            success: false,
+            message:
+              "full_name, amount and one contact field (email_mobile/email_address/mobile_number) are required",
+          });
+        }
+
+        const payload = {
+          full_name,
+          email_mobile: email_mobile || email_address || mobile_number,
+          email_address: email_address || email_mobile,
+          mobile_number: mobile_number || email_mobile,
+          amount: String(amount),
+          metadata,
+          redirect_url:
+            redirect_url ||
+            process.env.PIPRAPAY_REDIRECT_URL ||
+            process.env.CLIENT_URL,
+          return_type,
+          cancel_url:
+            cancel_url ||
+            process.env.PIPRAPAY_CANCEL_URL ||
+            process.env.CLIENT_URL,
+          webhook_url:
+            webhook_url ||
+            process.env.PIPRAPAY_WEBHOOK_URL ||
+            process.env.SERVER_URL,
+          currency,
+        };
+
+        const { ok, status, responseBody, rawBody, contentType } =
+          await pipraPayRequest({
+            path: "/api/create-charge",
+            fullUrl: PIPRAPAY_CHECKOUT_REDIRECT_URL,
+            payload,
+          });
+
+        if (!ok) {
+          return res.status(status || 400).json({
+            success: false,
+            message: "Failed to create PipraPay charge",
+            piprapay: responseBody,
+            piprapay_raw: rawBody,
+            piprapay_content_type: contentType,
+          });
+        }
+
+        await paymentsCollection.insertOne({
+          provider: "piprapay",
+          pp_id: responseBody?.pp_id ?? null,
+          amount: String(amount),
+          currency,
+          metadata,
+          status: "pending",
+          requestPayload: payload,
+          responsePayload: responseBody,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        });
+
+        res.json({
+          success: true,
+          message: "Charge created successfully",
+          data: responseBody,
+        });
+      } catch (error) {
+        const errorDetails = getErrorDetails(error);
+        res.status(500).json({
+          success: false,
+          message: "Failed to create charge",
+          error: errorDetails.message,
+          code: errorDetails.code,
+        });
+      }
+    });
+
+    // Verify PipraPay transaction status
+    app.post("/payments/piprapay/verify", async (req, res) => {
+      try {
+        if (!PIPRAPAY_API_KEY) {
+          return res.status(500).json({
+            success: false,
+            message: "PIPRAPAY_API_KEY missing in server env",
+          });
+        }
+
+        const { pp_id } = req.body;
+        if (!pp_id) {
+          return res.status(400).json({
+            success: false,
+            message: "pp_id is required",
+          });
+        }
+
+        const { ok, status, responseBody, rawBody, contentType } =
+          await pipraPayRequest({
+            path: "/api/verify-payments",
+            fullUrl: PIPRAPAY_VERIFY_PAYMENT_URL,
+            payload: { pp_id: String(pp_id) },
+          });
+
+        if (!ok) {
+          return res.status(status || 400).json({
+            success: false,
+            message: "Failed to verify payment",
+            piprapay: responseBody,
+            piprapay_raw: rawBody,
+            piprapay_content_type: contentType,
+          });
+        }
+
+        await paymentsCollection.updateOne(
+          { pp_id: String(pp_id) },
+          {
+            $set: {
+              provider: "piprapay",
+              verificationPayload: responseBody,
+              status: responseBody?.status || "unknown",
+              updatedAt: new Date(),
+            },
+            $setOnInsert: {
+              createdAt: new Date(),
+            },
+          },
+          { upsert: true },
+        );
+
+        res.json({
+          success: true,
+          message: "Payment verified successfully",
+          data: responseBody,
+        });
+      } catch (error) {
+        const errorDetails = getErrorDetails(error);
+        res.status(500).json({
+          success: false,
+          message: "Failed to verify payment",
+          error: errorDetails.message,
+          code: errorDetails.code,
+        });
+      }
+    });
+
+    // Receive and validate PipraPay webhook events
+    app.post("/payments/piprapay/webhook", async (req, res) => {
+      try {
+        if (!PIPRAPAY_API_KEY) {
+          return res.status(500).json({
+            success: false,
+            message: "PIPRAPAY_API_KEY missing in server env",
+          });
+        }
+
+        const receivedApiKey =
+          req.headers["mh-piprapay-api-key"] ||
+          req.headers["Mh-Piprapay-Api-Key"] ||
+          req.headers["mhs-piprapay-api-key"];
+
+        if (receivedApiKey !== PIPRAPAY_API_KEY) {
+          return res.status(401).json({
+            success: false,
+            message: "Unauthorized webhook request",
+          });
+        }
+
+        const webhookPayload = req.body || {};
+        const ppId = webhookPayload.pp_id ? String(webhookPayload.pp_id) : null;
+
+        await paymentsCollection.updateOne(
+          { pp_id: ppId },
+          {
+            $set: {
+              provider: "piprapay",
+              webhookPayload,
+              status: webhookPayload.status || "unknown",
+              updatedAt: new Date(),
+            },
+            $setOnInsert: {
+              createdAt: new Date(),
+            },
+          },
+          { upsert: true },
+        );
+
+        res.status(200).json({
+          success: true,
+          message: "Webhook received",
+        });
+      } catch (error) {
+        const errorDetails = getErrorDetails(error);
+        res.status(500).json({
+          success: false,
+          message: "Failed to process webhook",
+          error: errorDetails.message,
+          code: errorDetails.code,
         });
       }
     });
