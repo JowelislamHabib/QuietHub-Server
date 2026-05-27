@@ -1,0 +1,11 @@
+{
+  "version": "1.0",
+  "apis": [
+    {
+      "identifier": "piprapay",
+      "source": "@piprapay/v1.0#5mrx2imbjvva93",
+      "integrity": "sha512-TnwRoZiE/98EkbmyvO8iOWlaUwHX83jLmU2AxyhQXWoUAx6yIpoebkyVzAatwXKC/NzFIJnJHWbV2DcZV6nnDw==",
+      "installerVersion": "6.1.3"
+    }
+  ]
+}
