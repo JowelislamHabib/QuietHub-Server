@@ -208,8 +208,8 @@ Backend `.env`:
 
 ```env
 PIPRAPAY_API_KEY=...
-PIPRAPAY_CHECKOUT_REDIRECT_URL=https://pay.believersvision.com/api/checkout/redirect
-PIPRAPAY_VERIFY_PAYMENT_URL=https://pay.believersvision.com/api/verify-payment
+PIPRAPAY_CHECKOUT_REDIRECT_URL=https://<PipraPay-Installed-domain>/api/checkout/redirect
+PIPRAPAY_VERIFY_PAYMENT_URL=https://<PipraPay-Installed-domain>/api/verify-payment
 PIPRAPAY_DEFAULT_CURRENCY=USD
 
 PIPRAPAY_CALLBACK_URL=https://<backend-domain>/payments/piprapay/callback
@@ -289,8 +289,8 @@ APP_BASE_URL=https://app.example.com
 API_BASE_URL=https://api.example.com
 
 PIPRAPAY_API_KEY=your_key
-PIPRAPAY_CHECKOUT_URL=https://pay.believersvision.com/api/checkout/redirect
-PIPRAPAY_VERIFY_URL=https://pay.believersvision.com/api/verify-payment
+PIPRAPAY_CHECKOUT_URL=https://<PipraPay-Installed-domain>/api/checkout/redirect
+PIPRAPAY_VERIFY_URL=https://<PipraPay-Installed-domain>/api/verify-payment
 PIPRAPAY_DEFAULT_CURRENCY=USD
 
 PIPRAPAY_CALLBACK_URL=https://api.example.com/payments/piprapay/callback
@@ -331,8 +331,18 @@ const extractProviderStatus = (payload) => {
 
 const normalizePaymentState = (payload) => {
   const s = String(extractProviderStatus(payload)).toLowerCase();
-  if (["completed", "success", "succeeded", "paid"].includes(s)) return "completed";
-  if (["cancelled", "canceled", "failed", "expired", "declined", "rejected"].includes(s)) {
+  if (["completed", "success", "succeeded", "paid"].includes(s))
+    return "completed";
+  if (
+    [
+      "cancelled",
+      "canceled",
+      "failed",
+      "expired",
+      "declined",
+      "rejected",
+    ].includes(s)
+  ) {
     return "cancelled";
   }
   if (["pending", "processing"].includes(s)) return "pending";
@@ -356,7 +366,8 @@ Create `src/payments/piprapay.service.js`:
 ```js
 const verifyUrls = () => {
   const list = [];
-  if (process.env.PIPRAPAY_VERIFY_URL) list.push(process.env.PIPRAPAY_VERIFY_URL);
+  if (process.env.PIPRAPAY_VERIFY_URL)
+    list.push(process.env.PIPRAPAY_VERIFY_URL);
   return [...new Set(list)];
 };
 
@@ -386,7 +397,9 @@ const createCharge = (payload) =>
 const verifyPayment = async (providerPaymentId) => {
   let last = null;
   for (const url of verifyUrls()) {
-    const result = await pipraPayRequest(url, { pp_id: String(providerPaymentId) });
+    const result = await pipraPayRequest(url, {
+      pp_id: String(providerPaymentId),
+    });
     last = result;
     if (result.ok) return result;
   }
@@ -403,7 +416,10 @@ module.exports = { createCharge, verifyPayment };
 Add this function in your payments routes module:
 
 ```js
-const { normalizePaymentState, buildPaymentIdFilter } = require("./piprapay.helpers");
+const {
+  normalizePaymentState,
+  buildPaymentIdFilter,
+} = require("./piprapay.helpers");
 
 async function syncOrderFromPayment(db, providerPaymentId, paymentPayload) {
   const state = normalizePaymentState(paymentPayload);
@@ -461,11 +477,22 @@ module.exports = (db) => {
 
   async function syncOrder(providerPaymentId, payload) {
     const state = normalizePaymentState(payload);
-    const orderStatus = state === "completed" ? "confirmed" : state === "cancelled" ? "cancelled" : "pending";
+    const orderStatus =
+      state === "completed"
+        ? "confirmed"
+        : state === "cancelled"
+          ? "cancelled"
+          : "pending";
 
     await orders.updateOne(
       { providerPaymentId: String(providerPaymentId) },
-      { $set: { paymentStatus: state, status: orderStatus, updatedAt: new Date() } },
+      {
+        $set: {
+          paymentStatus: state,
+          status: orderStatus,
+          updatedAt: new Date(),
+        },
+      },
     );
   }
 
@@ -480,8 +507,14 @@ module.exports = (db) => {
       return_type = "GET",
     } = req.body;
 
-    if (!full_name || !amount || !(email_address || email_mobile || mobile_number)) {
-      return res.status(400).json({ success: false, message: "Missing required fields" });
+    if (
+      !full_name ||
+      !amount ||
+      !(email_address || email_mobile || mobile_number)
+    ) {
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing required fields" });
     }
 
     const callbackUrl = process.env.PIPRAPAY_CALLBACK_URL;
@@ -491,7 +524,9 @@ module.exports = (db) => {
       email_mobile: email_mobile || email_address || mobile_number,
       mobile_number: mobile_number || email_mobile,
       amount: String(amount),
-      currency: String(process.env.PIPRAPAY_DEFAULT_CURRENCY || "USD").toUpperCase(),
+      currency: String(
+        process.env.PIPRAPAY_DEFAULT_CURRENCY || "USD",
+      ).toUpperCase(),
       metadata,
       redirect_url: callbackUrl,
       return_url: callbackUrl,
@@ -552,7 +587,9 @@ module.exports = (db) => {
   router.post("/verify", async (req, res) => {
     const providerPaymentId = normalizePaymentId(req.body?.pp_id);
     if (!providerPaymentId) {
-      return res.status(400).json({ success: false, message: "pp_id required" });
+      return res
+        .status(400)
+        .json({ success: false, message: "pp_id required" });
     }
 
     const result = await verifyPayment(providerPaymentId);
@@ -594,13 +631,17 @@ module.exports = (db) => {
     );
 
     if (!providerPaymentId) {
-      return res.status(400).json({ success: false, message: "Missing payment reference" });
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing payment reference" });
     }
 
     const verify = await verifyPayment(providerPaymentId);
     const state = verify?.ok
       ? normalizePaymentState(verify.json)
-      : String(req.body?.pp_status || req.query?.pp_status || "unknown").toLowerCase();
+      : String(
+          req.body?.pp_status || req.query?.pp_status || "unknown",
+        ).toLowerCase();
 
     await payments.updateOne(
       buildPaymentIdFilter(providerPaymentId),
@@ -626,9 +667,12 @@ module.exports = (db) => {
   });
 
   router.post("/webhook", async (req, res) => {
-    const apiKey = req.headers["mh-piprapay-api-key"] || req.headers["mhs-piprapay-api-key"];
+    const apiKey =
+      req.headers["mh-piprapay-api-key"] || req.headers["mhs-piprapay-api-key"];
     if (apiKey !== process.env.PIPRAPAY_API_KEY) {
-      return res.status(401).json({ success: false, message: "Unauthorized webhook request" });
+      return res
+        .status(401)
+        .json({ success: false, message: "Unauthorized webhook request" });
     }
 
     const payload = req.body || {};
@@ -685,7 +729,11 @@ app.use(cors());
 app.use(express.json());
 
 const client = new MongoClient(process.env.MONGO_URI, {
-  serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
+  serverApi: {
+    version: ServerApiVersion.v1,
+    strict: true,
+    deprecationErrors: true,
+  },
 });
 
 async function run() {
@@ -704,18 +752,21 @@ Checkout button:
 
 ```js
 const onPay = async () => {
-  const res = await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/payments/piprapay/create-charge`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      full_name: user.name,
-      email_address: user.email,
-      amount: "10.00",
-      currency: "USD",
-      metadata: { order: { orderId: "ORD-123" } },
-      return_type: "GET",
-    }),
-  });
+  const res = await fetch(
+    `${process.env.NEXT_PUBLIC_SERVER_URL}/payments/piprapay/create-charge`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        full_name: user.name,
+        email_address: user.email,
+        amount: "10.00",
+        currency: "USD",
+        metadata: { order: { orderId: "ORD-123" } },
+        return_type: "GET",
+      }),
+    },
+  );
   const data = await res.json();
   if (!res.ok || !data?.data?.pp_url) throw new Error("payment init failed");
   window.location.assign(data.data.pp_url);
@@ -731,11 +782,14 @@ const ref =
   searchParams.get("transaction_ref");
 
 if (ref) {
-  await fetch(`${process.env.NEXT_PUBLIC_SERVER_URL}/payments/piprapay/verify`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ pp_id: ref }),
-  });
+  await fetch(
+    `${process.env.NEXT_PUBLIC_SERVER_URL}/payments/piprapay/verify`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pp_id: ref }),
+    },
+  );
 }
 ```
 
@@ -759,4 +813,3 @@ if (ref) {
 - Provider integrations differ by endpoint names and return query keys.
 - Always support multiple key names for callback parsing.
 - Keep backend authoritative; frontend should display state, not decide truth.
-
