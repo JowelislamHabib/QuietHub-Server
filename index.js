@@ -288,6 +288,25 @@ async function run() {
         contentType: response.headers.get("content-type"),
       };
     };
+    const verifyPipraPayPayment = async (ppId) => {
+      const normalizedPpId = normalizePipraPayId(ppId);
+      const verifyUrls = resolveVerifyUrls();
+      let verifyResult = null;
+
+      for (const verifyUrl of verifyUrls) {
+        const currentResult = await pipraPayRequest({
+          path: "/api/verify-payment",
+          fullUrl: verifyUrl,
+          payload: { pp_id: normalizedPpId },
+        });
+        verifyResult = currentResult;
+        if (currentResult.ok) {
+          break;
+        }
+      }
+
+      return { normalizedPpId, verifyResult };
+    };
 
     // Get all rooms (with search & filters)
 
@@ -559,6 +578,47 @@ async function run() {
 
         if (!userId || userId === "undefined") {
           return res.json([]);
+        }
+
+        // Auto-sync pending payments in case webhook was not delivered.
+        const pendingPaymentBookings = await bookingsCollection
+          .find(
+            {
+              userId,
+              status: "pending",
+              paymentPpId: { $exists: true, $ne: null },
+            },
+            { projection: { paymentPpId: 1 } },
+          )
+          .toArray();
+
+        for (const booking of pendingPaymentBookings) {
+          const { normalizedPpId, verifyResult } = await verifyPipraPayPayment(
+            booking.paymentPpId,
+          );
+          if (verifyResult?.ok) {
+            await paymentsCollection.updateOne(
+              buildPipraPayIdFilter(normalizedPpId),
+              {
+                $set: {
+                  provider: "piprapay",
+                  pp_id: normalizedPpId,
+                  verificationPayload: verifyResult.responseBody,
+                  status: verifyResult.responseBody?.status || "unknown",
+                  updatedAt: new Date(),
+                },
+                $setOnInsert: {
+                  createdAt: new Date(),
+                },
+              },
+              { upsert: true },
+            );
+            await syncBookingStatusFromPayment(
+              bookingsCollection,
+              normalizedPpId,
+              verifyResult.responseBody,
+            );
+          }
         }
 
         const result = await bookingsCollection
@@ -840,6 +900,15 @@ async function run() {
           });
         }
 
+        const requestOrigin = `${req.protocol}://${req.get("host")}`;
+        const callbackUrl =
+          process.env.PIPRAPAY_CALLBACK_URL ||
+          `${requestOrigin}/payments/piprapay/callback`;
+        const frontendRedirectUrl =
+          redirect_url ||
+          process.env.PIPRAPAY_REDIRECT_URL ||
+          process.env.CLIENT_URL;
+
         const payload = {
           full_name,
           email_mobile: email_mobile || email_address || mobile_number,
@@ -847,19 +916,15 @@ async function run() {
           mobile_number: mobile_number || email_mobile,
           amount: String(amount),
           metadata,
-          redirect_url:
-            redirect_url ||
-            process.env.PIPRAPAY_REDIRECT_URL ||
-            process.env.CLIENT_URL,
-          return_url:
-            redirect_url ||
-            process.env.PIPRAPAY_REDIRECT_URL ||
-            process.env.CLIENT_URL,
+          // Some PipraPay endpoints use redirect_url and others use return_url.
+          // We always return through backend callback so pp_id is captured reliably.
+          redirect_url: callbackUrl,
+          return_url: callbackUrl,
           return_type,
           cancel_url:
             cancel_url ||
             process.env.PIPRAPAY_CANCEL_URL ||
-            process.env.CLIENT_URL,
+            frontendRedirectUrl,
           webhook_url:
             webhook_url ||
             process.env.PIPRAPAY_WEBHOOK_URL ||
@@ -982,21 +1047,9 @@ async function run() {
           });
         }
 
-        const normalizedPpId = normalizePipraPayId(pp_id);
-        const verifyUrls = resolveVerifyUrls();
-        let verifyResult = null;
-
-        for (const verifyUrl of verifyUrls) {
-          const currentResult = await pipraPayRequest({
-            path: "/api/verify-payment",
-            fullUrl: verifyUrl,
-            payload: { pp_id: normalizedPpId },
-          });
-          verifyResult = currentResult;
-          if (currentResult.ok) {
-            break;
-          }
-        }
+        const { normalizedPpId, verifyResult } = await verifyPipraPayPayment(
+          pp_id,
+        );
 
         const { ok, status, responseBody, rawBody, contentType } = verifyResult;
 
@@ -1060,7 +1113,14 @@ async function run() {
         }
 
         const callbackPpId =
-          req.body?.pp_id || req.query?.pp_id || req.body?.invoice_id || req.query?.invoice_id;
+          req.body?.pp_id ||
+          req.query?.pp_id ||
+          req.body?.invoice_id ||
+          req.query?.invoice_id ||
+          req.body?.transaction_ref ||
+          req.query?.transaction_ref ||
+          req.body?.ppid ||
+          req.query?.ppid;
         const normalizedPpId = normalizePipraPayId(callbackPpId);
 
         if (!normalizedPpId) {
@@ -1070,26 +1130,18 @@ async function run() {
           });
         }
 
-        const verifyUrls = resolveVerifyUrls();
-        let verifyResult = null;
-
-        for (const verifyUrl of verifyUrls) {
-          const currentResult = await pipraPayRequest({
-            path: "/api/verify-payment",
-            fullUrl: verifyUrl,
-            payload: { pp_id: normalizedPpId },
-          });
-          verifyResult = currentResult;
-          if (currentResult.ok) {
-            break;
-          }
-        }
+        const { verifyResult } = await verifyPipraPayPayment(normalizedPpId);
 
         const { ok, responseBody } = verifyResult;
 
+        const callbackStatus =
+          req.body?.pp_status ||
+          req.query?.pp_status ||
+          req.body?.status ||
+          req.query?.status;
         const finalStatus = ok
           ? parseStatusFromPipraPayPayload(responseBody)
-          : "verify_failed";
+          : callbackStatus || "verify_failed";
 
         await paymentsCollection.updateOne(
           buildPipraPayIdFilter(normalizedPpId),
@@ -1160,6 +1212,10 @@ async function run() {
 
         const webhookPayload = req.body || {};
         const ppId = normalizePipraPayId(webhookPayload.pp_id);
+        console.log("[piprapay-webhook] received", {
+          ppId,
+          status: webhookPayload?.status,
+        });
 
         await paymentsCollection.updateOne(
           buildPipraPayIdFilter(ppId),
@@ -1179,6 +1235,30 @@ async function run() {
         );
 
         await syncBookingStatusFromPayment(bookingsCollection, ppId, webhookPayload);
+
+        // If dashboard update webhook does not contain final status,
+        // force-refresh by hitting verify endpoint.
+        const webhookStatus = parsePaymentState(webhookPayload);
+        if (!webhookStatus || webhookStatus === "unknown" || webhookStatus === "pending") {
+          const { verifyResult } = await verifyPipraPayPayment(ppId);
+          if (verifyResult?.ok) {
+            await paymentsCollection.updateOne(
+              buildPipraPayIdFilter(ppId),
+              {
+                $set: {
+                  verificationPayload: verifyResult.responseBody,
+                  status: verifyResult.responseBody?.status || "unknown",
+                  updatedAt: new Date(),
+                },
+              },
+            );
+            await syncBookingStatusFromPayment(
+              bookingsCollection,
+              ppId,
+              verifyResult.responseBody,
+            );
+          }
+        }
 
         res.status(200).json({
           success: true,
