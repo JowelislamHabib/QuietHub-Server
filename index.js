@@ -61,8 +61,28 @@ const parseStatusFromPipraPayPayload = (payload) => {
     "unknown"
   );
 };
-const parsePaymentState = (payload) =>
-  String(parseStatusFromPipraPayPayload(payload)).toLowerCase();
+const parsePaymentState = (payload) => {
+  const raw = String(parseStatusFromPipraPayPayload(payload)).toLowerCase();
+  if (["completed", "success", "succeeded", "paid"].includes(raw)) {
+    return "completed";
+  }
+  if (
+    [
+      "cancelled",
+      "canceled",
+      "failed",
+      "rejected",
+      "declined",
+      "expired",
+    ].includes(raw)
+  ) {
+    return "cancelled";
+  }
+  if (["pending", "processing"].includes(raw)) {
+    return "pending";
+  }
+  return "unknown";
+};
 const syncBookingStatusFromPayment = async (
   bookingsCollection,
   ppId,
@@ -72,7 +92,12 @@ const syncBookingStatusFromPayment = async (
   if (!normalizedPpId) return;
 
   const paymentState = parsePaymentState(paymentPayload);
-  const bookingStatus = paymentState === "completed" ? "confirmed" : "pending";
+  let bookingStatus = "pending";
+  if (paymentState === "completed") {
+    bookingStatus = "confirmed";
+  } else if (paymentState === "cancelled") {
+    bookingStatus = "cancelled";
+  }
 
   await bookingsCollection.updateOne(
     { paymentPpId: normalizedPpId },
