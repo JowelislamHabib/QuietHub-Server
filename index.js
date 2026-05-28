@@ -61,6 +61,31 @@ const parseStatusFromPipraPayPayload = (payload) => {
     "unknown"
   );
 };
+const parsePaymentState = (payload) =>
+  String(parseStatusFromPipraPayPayload(payload)).toLowerCase();
+const syncBookingStatusFromPayment = async (
+  bookingsCollection,
+  ppId,
+  paymentPayload,
+) => {
+  const normalizedPpId = normalizePipraPayId(ppId);
+  if (!normalizedPpId) return;
+
+  const paymentState = parsePaymentState(paymentPayload);
+  const bookingStatus = paymentState === "completed" ? "confirmed" : "pending";
+
+  await bookingsCollection.updateOne(
+    { paymentPpId: normalizedPpId },
+    {
+      $set: {
+        paymentStatus: paymentState,
+        status: bookingStatus,
+        paymentVerifiedAt: new Date(),
+        updatedAt: new Date(),
+      },
+    },
+  );
+};
 const getErrorDetails = (error) => ({
   message: error?.message || "Unknown error",
   code: error?.cause?.code || null,
@@ -826,6 +851,10 @@ async function run() {
             redirect_url ||
             process.env.PIPRAPAY_REDIRECT_URL ||
             process.env.CLIENT_URL,
+          return_url:
+            redirect_url ||
+            process.env.PIPRAPAY_REDIRECT_URL ||
+            process.env.CLIENT_URL,
           return_type,
           cancel_url:
             cancel_url ||
@@ -855,9 +884,60 @@ async function run() {
           });
         }
 
+        const normalizedPpId = normalizePipraPayId(responseBody?.pp_id);
+        const bookingData = metadata?.booking;
+
+        if (
+          bookingData &&
+          bookingData.roomId &&
+          bookingData.userId &&
+          bookingData.date &&
+          bookingData.startTime &&
+          bookingData.endTime &&
+          normalizedPpId
+        ) {
+          const normalizedDate = normalizeDate(bookingData.date);
+          const normalizedStart = normalizeTime(bookingData.startTime);
+          const normalizedEnd = normalizeTime(bookingData.endTime);
+          const roomIdValue = String(bookingData.roomId);
+          let roomIdForInsert = roomIdValue;
+
+          try {
+            roomIdForInsert = new ObjectId(roomIdValue);
+          } catch (error) {
+            roomIdForInsert = roomIdValue;
+          }
+
+          await bookingsCollection.updateOne(
+            { paymentPpId: normalizedPpId },
+            {
+              $setOnInsert: {
+                roomId: roomIdForInsert,
+                userId: bookingData.userId,
+                date: normalizedDate,
+                startTime: normalizedStart,
+                endTime: normalizedEnd,
+                note: bookingData.note || "",
+                totalCost: bookingData.totalCost,
+                roomName: bookingData.roomName,
+                hourlyRate: bookingData.hourlyRate,
+                userEmail: bookingData.userEmail,
+                userName: bookingData.userName,
+                status: "pending",
+                paymentProvider: "piprapay",
+                paymentPpId: normalizedPpId,
+                paymentStatus: "pending",
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+            },
+            { upsert: true },
+          );
+        }
+
         await paymentsCollection.insertOne({
           provider: "piprapay",
-          pp_id: normalizePipraPayId(responseBody?.pp_id),
+          pp_id: normalizedPpId,
           amount: String(amount),
           currency,
           metadata,
@@ -947,6 +1027,12 @@ async function run() {
           { upsert: true },
         );
 
+        await syncBookingStatusFromPayment(
+          bookingsCollection,
+          normalizedPpId,
+          responseBody,
+        );
+
         res.json({
           success: true,
           message: "Payment verified successfully",
@@ -1026,6 +1112,10 @@ async function run() {
           { upsert: true },
         );
 
+        await syncBookingStatusFromPayment(bookingsCollection, normalizedPpId, {
+          status: finalStatus,
+        });
+
         const successBase =
           process.env.PIPRAPAY_REDIRECT_URL || process.env.CLIENT_URL || "/";
         const separator = successBase.includes("?") ? "&" : "?";
@@ -1087,6 +1177,8 @@ async function run() {
           },
           { upsert: true },
         );
+
+        await syncBookingStatusFromPayment(bookingsCollection, ppId, webhookPayload);
 
         res.status(200).json({
           success: true,
