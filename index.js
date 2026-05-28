@@ -922,10 +922,7 @@ async function run() {
           return_type = "GET",
           cancel_url,
           webhook_url,
-          currency =
-            process.env.PIPRAPAY_DEFAULT_CURRENCY ||
-            process.env.NEXT_PUBLIC_CURRENCY ||
-            "USD",
+          currency,
         } = req.body;
 
         const contact = email_mobile || email_address || mobile_number;
@@ -945,6 +942,9 @@ async function run() {
           redirect_url ||
           process.env.PIPRAPAY_REDIRECT_URL ||
           process.env.CLIENT_URL;
+        const effectiveCurrency = String(
+          process.env.PIPRAPAY_DEFAULT_CURRENCY || currency || "USD",
+        ).toUpperCase();
 
         const payload = {
           full_name,
@@ -966,7 +966,7 @@ async function run() {
             webhook_url ||
             process.env.PIPRAPAY_WEBHOOK_URL ||
             process.env.SERVER_URL,
-          currency,
+          currency: effectiveCurrency,
         };
 
         const { ok, status, responseBody, rawBody, contentType } =
@@ -1041,7 +1041,7 @@ async function run() {
           provider: "piprapay",
           pp_id: normalizedPpId,
           amount: String(amount),
-          currency,
+          currency: effectiveCurrency,
           metadata,
           status: "pending",
           requestPayload: payload,
@@ -1084,9 +1084,8 @@ async function run() {
           });
         }
 
-        const { normalizedPpId, verifyResult } = await verifyPipraPayPayment(
-          pp_id,
-        );
+        const { normalizedPpId, verifyResult } =
+          await verifyPipraPayPayment(pp_id);
 
         const { ok, status, responseBody, rawBody, contentType } = verifyResult;
 
@@ -1271,24 +1270,29 @@ async function run() {
           { upsert: true },
         );
 
-        await syncBookingStatusFromPayment(bookingsCollection, ppId, webhookPayload);
+        await syncBookingStatusFromPayment(
+          bookingsCollection,
+          ppId,
+          webhookPayload,
+        );
 
         // If dashboard update webhook does not contain final status,
         // force-refresh by hitting verify endpoint.
         const webhookStatus = parsePaymentState(webhookPayload);
-        if (!webhookStatus || webhookStatus === "unknown" || webhookStatus === "pending") {
+        if (
+          !webhookStatus ||
+          webhookStatus === "unknown" ||
+          webhookStatus === "pending"
+        ) {
           const { verifyResult } = await verifyPipraPayPayment(ppId);
           if (verifyResult?.ok) {
-            await paymentsCollection.updateOne(
-              buildPipraPayIdFilter(ppId),
-              {
-                $set: {
-                  verificationPayload: verifyResult.responseBody,
-                  status: verifyResult.responseBody?.status || "unknown",
-                  updatedAt: new Date(),
-                },
+            await paymentsCollection.updateOne(buildPipraPayIdFilter(ppId), {
+              $set: {
+                verificationPayload: verifyResult.responseBody,
+                status: verifyResult.responseBody?.status || "unknown",
+                updatedAt: new Date(),
               },
-            );
+            });
             await syncBookingStatusFromPayment(
               bookingsCollection,
               ppId,
