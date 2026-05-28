@@ -682,6 +682,15 @@ async function run() {
           });
         }
 
+        const paymentStatus = String(booking.paymentStatus || "").toLowerCase();
+        if (paymentStatus && paymentStatus !== "completed") {
+          return res.json({
+            success: false,
+            message:
+              "Reschedule allowed only for bookings with completed payment status",
+          });
+        }
+
         if (!date || !startTime || !endTime) {
           return res.json({
             success: false,
