@@ -33,10 +33,47 @@ const buildPipraPayUrl = ({ path, fullUrl }) => {
   }
   return `${PIPRAPAY_BASE_URL}${path}`;
 };
+const normalizePipraPayId = (ppId) => String(ppId ?? "").trim();
+const buildPipraPayIdFilter = (ppId) => {
+  const normalizedId = normalizePipraPayId(ppId);
+  const numericId = Number(normalizedId);
+
+  if (!normalizedId) {
+    return { pp_id: null };
+  }
+
+  if (!Number.isNaN(numericId)) {
+    return {
+      $or: [{ pp_id: normalizedId }, { pp_id: numericId }],
+    };
+  }
+
+  return { pp_id: normalizedId };
+};
+const parseStatusFromPipraPayPayload = (payload) => {
+  if (!payload || typeof payload !== "object") {
+    return "unknown";
+  }
+  return (
+    payload.status ||
+    payload.payment_status ||
+    payload.transaction_status ||
+    "unknown"
+  );
+};
 const getErrorDetails = (error) => ({
   message: error?.message || "Unknown error",
   code: error?.cause?.code || null,
 });
+const resolveVerifyUrls = () => {
+  const urls = [];
+  if (PIPRAPAY_VERIFY_PAYMENT_URL) {
+    urls.push(PIPRAPAY_VERIFY_PAYMENT_URL);
+  }
+  urls.push(`${PIPRAPAY_BASE_URL}/api/verify-payment`);
+  urls.push(`${PIPRAPAY_BASE_URL}/api/verify-payments`);
+  return [...new Set(urls)];
+};
 
 const JWKS = createRemoteJWKSet(
   new URL(`${process.env.CLIENT_URL}/api/auth/jwks`),
@@ -820,7 +857,7 @@ async function run() {
 
         await paymentsCollection.insertOne({
           provider: "piprapay",
-          pp_id: responseBody?.pp_id ?? null,
+          pp_id: normalizePipraPayId(responseBody?.pp_id),
           amount: String(amount),
           currency,
           metadata,
@@ -865,12 +902,23 @@ async function run() {
           });
         }
 
-        const { ok, status, responseBody, rawBody, contentType } =
-          await pipraPayRequest({
-            path: "/api/verify-payments",
-            fullUrl: PIPRAPAY_VERIFY_PAYMENT_URL,
-            payload: { pp_id: String(pp_id) },
+        const normalizedPpId = normalizePipraPayId(pp_id);
+        const verifyUrls = resolveVerifyUrls();
+        let verifyResult = null;
+
+        for (const verifyUrl of verifyUrls) {
+          const currentResult = await pipraPayRequest({
+            path: "/api/verify-payment",
+            fullUrl: verifyUrl,
+            payload: { pp_id: normalizedPpId },
           });
+          verifyResult = currentResult;
+          if (currentResult.ok) {
+            break;
+          }
+        }
+
+        const { ok, status, responseBody, rawBody, contentType } = verifyResult;
 
         if (!ok) {
           return res.status(status || 400).json({
@@ -883,10 +931,11 @@ async function run() {
         }
 
         await paymentsCollection.updateOne(
-          { pp_id: String(pp_id) },
+          buildPipraPayIdFilter(normalizedPpId),
           {
             $set: {
               provider: "piprapay",
+              pp_id: normalizedPpId,
               verificationPayload: responseBody,
               status: responseBody?.status || "unknown",
               updatedAt: new Date(),
@@ -908,6 +957,89 @@ async function run() {
         res.status(500).json({
           success: false,
           message: "Failed to verify payment",
+          error: errorDetails.message,
+          code: errorDetails.code,
+        });
+      }
+    });
+
+    // Redirect callback: auto-verify pp_id and forward to frontend
+    app.all("/payments/piprapay/callback", async (req, res) => {
+      try {
+        if (!PIPRAPAY_API_KEY) {
+          return res.status(500).json({
+            success: false,
+            message: "PIPRAPAY_API_KEY missing in server env",
+          });
+        }
+
+        const callbackPpId =
+          req.body?.pp_id || req.query?.pp_id || req.body?.invoice_id || req.query?.invoice_id;
+        const normalizedPpId = normalizePipraPayId(callbackPpId);
+
+        if (!normalizedPpId) {
+          return res.status(400).json({
+            success: false,
+            message: "pp_id is required in callback",
+          });
+        }
+
+        const verifyUrls = resolveVerifyUrls();
+        let verifyResult = null;
+
+        for (const verifyUrl of verifyUrls) {
+          const currentResult = await pipraPayRequest({
+            path: "/api/verify-payment",
+            fullUrl: verifyUrl,
+            payload: { pp_id: normalizedPpId },
+          });
+          verifyResult = currentResult;
+          if (currentResult.ok) {
+            break;
+          }
+        }
+
+        const { ok, responseBody } = verifyResult;
+
+        const finalStatus = ok
+          ? parseStatusFromPipraPayPayload(responseBody)
+          : "verify_failed";
+
+        await paymentsCollection.updateOne(
+          buildPipraPayIdFilter(normalizedPpId),
+          {
+            $set: {
+              provider: "piprapay",
+              pp_id: normalizedPpId,
+              callbackPayload: {
+                body: req.body,
+                query: req.query,
+              },
+              verificationPayload: responseBody,
+              status: finalStatus,
+              updatedAt: new Date(),
+            },
+            $setOnInsert: {
+              createdAt: new Date(),
+            },
+          },
+          { upsert: true },
+        );
+
+        const successBase =
+          process.env.PIPRAPAY_REDIRECT_URL || process.env.CLIENT_URL || "/";
+        const separator = successBase.includes("?") ? "&" : "?";
+        const redirectUrl =
+          `${successBase}${separator}` +
+          `pp_id=${encodeURIComponent(normalizedPpId)}` +
+          `&status=${encodeURIComponent(finalStatus)}`;
+
+        return res.redirect(302, redirectUrl);
+      } catch (error) {
+        const errorDetails = getErrorDetails(error);
+        return res.status(500).json({
+          success: false,
+          message: "Failed to process callback",
           error: errorDetails.message,
           code: errorDetails.code,
         });
@@ -937,13 +1069,14 @@ async function run() {
         }
 
         const webhookPayload = req.body || {};
-        const ppId = webhookPayload.pp_id ? String(webhookPayload.pp_id) : null;
+        const ppId = normalizePipraPayId(webhookPayload.pp_id);
 
         await paymentsCollection.updateOne(
-          { pp_id: ppId },
+          buildPipraPayIdFilter(ppId),
           {
             $set: {
               provider: "piprapay",
+              pp_id: ppId,
               webhookPayload,
               status: webhookPayload.status || "unknown",
               updatedAt: new Date(),
