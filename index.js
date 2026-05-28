@@ -922,7 +922,10 @@ async function run() {
           return_type = "GET",
           cancel_url,
           webhook_url,
-          currency = "BDT",
+          currency =
+            process.env.PIPRAPAY_DEFAULT_CURRENCY ||
+            process.env.NEXT_PUBLIC_CURRENCY ||
+            "USD",
         } = req.body;
 
         const contact = email_mobile || email_address || mobile_number;
